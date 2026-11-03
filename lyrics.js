@@ -250,6 +250,9 @@
     // actually playing (title + artist agree), because Windows' media session
     // can show a different player than the one the extension reports.
     const SPOTIFY_ISRC_WAIT_MS = 2000; // how long to wait for a pending ISRC
+    // Kill switch for bisecting: false = behave exactly like before the Spotify
+    // ISRC work (scored lrc.red lookup only, no spotify-id / song-album).
+    const USE_SPOTIFY = false;
 
     function spotifyMatches(title, artist) {
         const sp = window.__mediaState && window.__mediaState.spotify;
@@ -290,7 +293,7 @@
     // can never linger.
     function spotifyExtras(title, artist) {
         const sp = window.__mediaState && window.__mediaState.spotify;
-        if (!sp || !spotifyMatches(title, artist)) return { spotifyId: '', album: '' };
+        if (!USE_SPOTIFY || !sp || !spotifyMatches(title, artist)) return { spotifyId: '', album: '' };
         const m = /^spotify:track:([A-Za-z0-9]{22})$/.exec(sp.uri || '');
         return { spotifyId: m ? m[1] : '', album: sp.album || '' };
     }
@@ -354,7 +357,7 @@
             durationSec = state.duration > 0 ? state.duration : 0;
 
             // Preferred path: Spotify told us the exact ISRC, no match.json needed.
-            if (spotifyMatches(title, artist)) {
+            if (USE_SPOTIFY && spotifyMatches(title, artist)) {
                 const isrc = await waitForSpotifyIsrc(title, artist, token);
                 if (token !== trackToken) return;
                 if (isrc) {
@@ -427,6 +430,7 @@
         player.songAlbum = fallbackExtras.album;
         player.spotifyId = fallbackExtras.spotifyId;
         player.isrc = useIsrc ? choice.hit.isrc : '';
+        console.log('[Lyrics] track applied to am-lyrics (fallback path): "' + title + '"');
     }
 
     function onMediaUpdate(event) {
