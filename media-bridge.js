@@ -1,9 +1,14 @@
 // media-bridge.js
 // Talks to the Python backend (ws://127.0.0.1:5002/ws):
-//   - receives position_update (from Windows media controls)
+//   - receives position_update (position / duration / is_playing)
+//   - receives media_properties (title / artist / album from the Windows media
+//     session), so the page works without Wallpaper Engine (e.g. GitHub Pages)
 //   - receives track_meta (cover URL + ISRC + track identity, relayed from the
 //     Spicetify extension time-transferrer.js; null when Spotify goes away)
 //   - sends playback commands back
+//
+// Title/artist priority: the OS (media_properties) wins. If the OS reports
+// nothing, Spotify's own title/artist from track_meta are used instead.
 //
 // Spotify's view of the current track lives in window.__mediaState.spotify:
 //   { uri, title, artist, album, durationMs, isrc }   (isrc is null while the
@@ -18,12 +23,14 @@
     window.__mediaState = Object.assign({
         title: '',
         artist: '',
+        album: '',
         position: 0,
         duration: 0,
         is_playing: false,
         cover: '',
         spotify: null,
-        _lastArt: null
+        _lastArt: null,
+        _osTitle: false   // true while the OS is supplying the title
     }, window.__mediaState || {});
 
     const WS_URL = 'ws://127.0.0.1:5002/ws';
@@ -63,9 +70,24 @@
                 }
             }
         } else {
-            // Spotify went away: let Wallpaper Engine's own art take over again
+            // Spotify went away: let other art sources take over again
             lastAppliedCoverUrl = '';
             window.__mediaState._lastArt = null;
+        }
+        notifyUpdate();
+    }
+
+    // OS title/artist/album from clock.py
+    function handleMediaProperties(data) {
+        const s = window.__mediaState;
+        const osHasTrack = Boolean(data.title);
+        s._osTitle = osHasTrack;
+
+        // If the OS reports nothing but Spotify is connected, keep Spotify's text.
+        if (osHasTrack || !s.spotify) {
+            s.title = data.title || '';
+            s.artist = data.artist || '';
+            s.album = data.album || '';
         }
         notifyUpdate();
     }
@@ -73,15 +95,22 @@
     // data = { cover, isrc, track: { uri, title, artist, album, durationMs } }
     // or null when Spotify/Spicetify disconnected.
     function handleTrackMeta(data) {
+        const s = window.__mediaState;
+
         if (!data) {
-            window.__mediaState.spotify = null;
+            if (!s._osTitle) {
+                s.title = '';
+                s.artist = '';
+                s.album = '';
+            }
+            s.spotify = null;
             handleCoverUpdate('');
             notifyTrackMeta();
             return;
         }
 
         const t = data.track || {};
-        window.__mediaState.spotify = {
+        s.spotify = {
             uri: t.uri || null,
             title: t.title || '',
             artist: t.artist || '',
@@ -89,7 +118,16 @@
             durationMs: Number(t.durationMs) || 0,
             isrc: data.isrc || null
         };
-        console.log('[Bridge WS] track_meta:', window.__mediaState.spotify);
+        console.log('[Bridge WS] track_meta:', s.spotify);
+
+        // No OS title: use Spotify's. Set BEFORE the cover is applied, because
+        // cover-changer.js ties the cover to the current track key.
+        if (!s._osTitle && t.title) {
+            s.title = t.title;
+            s.artist = t.artist || '';
+            s.album = t.album || '';
+            notifyUpdate();
+        }
 
         handleCoverUpdate(data.cover);
         notifyTrackMeta();
@@ -113,6 +151,8 @@
                         window.__mediaState.is_playing = msg.data.is_playing;
                     }
                     notifyUpdate();
+                } else if (msg.type === 'media_properties' && msg.data) {
+                    handleMediaProperties(msg.data);
                 } else if (msg.type === 'track_meta') {
                     handleTrackMeta(msg.data); // data may be null (Spotify gone)
                 } else if (msg.type === 'cover_update' && msg.data) {
@@ -144,10 +184,4 @@
     };
 
     initWebSocket();
-
-    // NOTE: wallpaperRegisterMediaPropertiesListener is intentionally NOT
-    // registered here. Wallpaper Engine only keeps one active callback per
-    // listener type, so registering it again would silently replace the one in
-    // wallpaper_engine.js. That script already dispatches 'media-update' with
-    // title/artist.
 })();
