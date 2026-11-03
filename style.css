@@ -3,7 +3,7 @@ html, body {
             width: 100%;
             height: 100%;
             overflow: hidden;
-            background: #333;
+            background: transparent;
         }
 
         /* ── Kawarp Background ── */
@@ -276,3 +276,13 @@ html, body {
                 font-size: 28px;
             }
         }
+
+    #bg-scrim {
+        position: fixed;
+        inset: 0;
+        z-index: 0;              /* same level as #bg, but later in DOM so it sits on top */
+        pointer-events: none;
+        background: #000;
+        opacity: var(--scrim, 0.25);
+        transition: opacity 1.2s ease;   /* matches Kawarp's slow crossfade */
+    }
