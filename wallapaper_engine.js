@@ -1,4 +1,12 @@
 // wallpaper_engine.js – Full Event Logging + Fallback
+//
+// FIX: the OS (Windows media session) thumbnail is low-res. It must never
+// overwrite Spotify's cover for the same track. The old check relied on
+// __mediaState.externalCoverTitle, which nothing ever set, so the thumbnail
+// always won whenever it landed last. spotifyOwnsCover() now uses state that
+// media-bridge.js really maintains (__mediaState.cover + __mediaState.spotify),
+// and is checked AGAIN after the async image decode, because the Spotify
+// cover can arrive while the thumbnail is still decoding.
 (function() {
     'use strict';
 
@@ -17,17 +25,44 @@
     // of the app "the new art is ready to read from disk".
     const DISK_WRITE_SETTLE_MS = 80;
 
+    function norm(s) {
+        return String(s || '')
+            .toLowerCase()
+            .normalize('NFKD')
+            .replace(/[\u0300-\u036f]/g, '')
+            .replace(/[^\p{L}\p{N}]+/gu, ' ')
+            .trim();
+    }
+
+    // True when Spotify supplied a cover URL for the track the OS is
+    // currently reporting.
+    function spotifyOwnsCover() {
+        const s = window.__mediaState;
+        if (!s.cover || !s.spotify || !s.spotify.title || !s.title) return false;
+        const a = norm(s.spotify.title);
+        const b = norm(s.title);
+        return Boolean(a && b && (a === b || a.includes(b) || b.includes(a)));
+    }
+
     function notifyUpdate() {
         window.dispatchEvent(new CustomEvent('media-update', {
             detail: { ...window.__mediaState }
         }));
     }
 
-    function saveCoverArtFromDataUrl(dataUrl) {
+    // isOsArt = true for the Windows thumbnail (can be vetoed by Spotify's
+    // cover), false when we deliberately want to apply it (restore path).
+    function saveCoverArtFromDataUrl(dataUrl, isOsArt) {
         if (!dataUrl) return;
         const img = new Image();
         img.crossOrigin = "anonymous";
         img.onload = function() {
+            // Spotify's cover took over while this thumbnail was decoding.
+            if (isOsArt && spotifyOwnsCover()) {
+                console.log('[WPE] Spotify cover took over, dropping OS thumbnail.');
+                return;
+            }
+
             const canvas = document.createElement('canvas');
             canvas.width = img.width;
             canvas.height = img.height;
@@ -57,11 +92,11 @@
         img.src = dataUrl;
     }
 
-    // Used by cover-changer.js if the exact Spotify art fails to load: falls
-    // back to the OS thumbnail we held back for this track.
+    // Used by cover-changer.js if the Spotify art fails to load: falls back
+    // to the OS thumbnail we held back for this track.
     window.wallpaperRestoreOsArt = function() {
         const art = window.__mediaState._osArt;
-        if (art) saveCoverArtFromDataUrl(art);
+        if (art) saveCoverArtFromDataUrl(art, false);
     };
 
     // ── Media Properties ──
@@ -86,19 +121,12 @@
 
             if (activeArt && activeArt !== window.__mediaState._lastArt) {
                 window.__mediaState._lastArt = activeArt;
-                window.__mediaState._osArt = activeArt;
+                window.__mediaState._osArt = activeArt; // kept for wallpaperRestoreOsArt()
 
-                // If the exact Spotify art for THIS track is already applied,
-                // don't let the lower-quality OS thumbnail overwrite it.
-                const s = window.__mediaState;
-                const spotifyHasIt = s.externalCoverTitle
-                    && window.trackMatch
-                    && window.trackMatch.loose(s.externalCoverTitle, s.title);
-
-                if (spotifyHasIt) {
+                if (spotifyOwnsCover()) {
                     console.log('[WPE] Spotify art already applied for this track, keeping it.');
                 } else {
-                    saveCoverArtFromDataUrl(activeArt);
+                    saveCoverArtFromDataUrl(activeArt, true);
                 }
             } else {
                 console.log('[WPE] No new art found.');

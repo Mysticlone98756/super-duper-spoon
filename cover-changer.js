@@ -1,7 +1,14 @@
-// cover-changer.js – free/keyless iTunes Search API fallback for cover art.
-// Runs only when the OS media session (wallapaper_engine.js) didn't already
-// supply embedded artwork for the current track. No API key, no paid tier —
-// itunes.apple.com/search is a public, unauthenticated endpoint.
+// cover-changer.js – cover art pipeline for covers that don't come from the OS.
+//  * Spotify covers: media-bridge.js calls window.wallpaperApplyCoverUrl(url).
+//  * iTunes Search API fallback (free, keyless) when nothing else supplied art.
+//
+// CHANGES
+//  * Images are downscaled to MAX_COVER_PX before PNG encoding, so a 3000px
+//    Spotify original doesn't produce a huge cover.png / wallpaperWriteFile
+//    call (Wallpaper Engine's embedded browser is fragile).
+//  * saveCoverFromUrl() now reports success. If the Spotify cover can't be
+//    loaded (e.g. missing CORS headers), the OS thumbnail is restored instead
+//    of leaving the previous track's art on screen.
 (function() {
     'use strict';
 
@@ -14,10 +21,12 @@
     let externalCoverAt = -Infinity;
     const EXTERNAL_COVER_FRESH_MS = 8000;
 
-    // Same settle buffer as wallapaper_engine.js — gives wallpaperWriteFile()
-    // a moment to actually flush before telling disk-reading listeners the
-    // new cover.png is ready to read.
+    // Same settle buffer as wallapaper_engine.js: gives wallpaperWriteFile()
+    // a moment to flush before telling disk-reading listeners to read it.
     const DISK_WRITE_SETTLE_MS = 80;
+
+    // Longest side of the saved cover. 1600px is plenty for a 580px cover.
+    const MAX_COVER_PX = 1600;
 
     function makeQueryKey(title, artist) {
         return `${(title || '').trim().toLowerCase()}::${(artist || '').trim().toLowerCase()}`;
@@ -40,6 +49,7 @@
         return null;
     }
 
+    // Returns true if the cover was applied, false on any failure.
     async function saveCoverFromUrl(url) {
         try {
             const img = new Image();
@@ -50,38 +60,45 @@
                 img.src = url;
             });
 
+            const scale = Math.min(1, MAX_COVER_PX / Math.max(img.naturalWidth, img.naturalHeight));
             const canvas = document.createElement('canvas');
-            canvas.width = img.naturalWidth;
-            canvas.height = img.naturalHeight;
-            canvas.getContext('2d').drawImage(img, 0, 0);
-            const rawBase64 = canvas.toDataURL('image/png').split(',')[1];
+            canvas.width = Math.round(img.naturalWidth * scale);
+            canvas.height = Math.round(img.naturalHeight * scale);
+            const ctx = canvas.getContext('2d');
+            ctx.imageSmoothingQuality = 'high';
+            ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
 
-            // Fast path: skip the disk round-trip for rendering — push the
-            // bitmap we already decoded straight to Kawarp/UI. Happens
-            // unconditionally so it works even if the disk write below fails
-            // or wallpaperWriteFile isn't available at all.
+            // Throws if the image was served without CORS headers.
+            const dataUrl = canvas.toDataURL('image/png');
+            const rawBase64 = dataUrl.split(',')[1];
+
+            console.log('[CoverChanger] cover ' + img.naturalWidth + 'x' + img.naturalHeight +
+                ' -> ' + canvas.width + 'x' + canvas.height);
+
+            // Fast path: push the bitmap we already decoded straight to
+            // Kawarp. Happens unconditionally so it works even if the disk
+            // write below fails or wallpaperWriteFile isn't available.
             if (window.__kawarp && typeof window.__kawarp.loadImageElement === 'function') {
                 window.__kawarp.loadImageElement(canvas);
             }
 
             if (typeof window.wallpaperWriteFile === 'function') {
                 window.wallpaperWriteFile('cover.png', rawBase64);
-                console.log('[CoverChanger] cover.png saved from iTunes fallback.');
-                // Give the write a moment to land before disk-reading
-                // listeners (bg.js, ui_controller.js) try to reload it.
+                console.log('[CoverChanger] cover.png saved.');
                 setTimeout(() => {
                     window.dispatchEvent(new CustomEvent('cover-updated', { detail: { canvas } }));
                 }, DISK_WRITE_SETTLE_MS);
             } else {
-                // wallpaperWriteFile is genuinely unavailable — cover.png was
-                // NOT written. Include dataUrl so listeners apply the art
-                // directly instead of re-reading a file that never changed.
+                // wallpaperWriteFile is unavailable: cover.png was NOT written.
+                // Include dataUrl so listeners apply the art directly.
                 window.dispatchEvent(new CustomEvent('cover-updated', {
-                    detail: { canvas, dataUrl: canvas.toDataURL('image/png') }
+                    detail: { canvas, dataUrl: dataUrl }
                 }));
             }
+            return true;
         } catch (e) {
-            console.warn('[CoverChanger] Failed to save fallback cover:', e);
+            console.warn('[CoverChanger] Failed to save cover:', e);
+            return false;
         }
     }
 
@@ -89,7 +106,7 @@
     // calls this with the Spotify cover URL relayed from the Spicetify
     // extension). Marks the track as "art supplied" so the iTunes fallback
     // below doesn't also fire and overwrite it.
-    window.wallpaperApplyCoverUrl = function(url) {
+    window.wallpaperApplyCoverUrl = async function(url) {
         if (!url) return;
         wpeSuppliedArtFor = lastQuery;
         externalCoverAt = performance.now();
@@ -97,7 +114,18 @@
             clearTimeout(pendingTimeout);
             pendingTimeout = null;
         }
-        return saveCoverFromUrl(url);
+
+        const ok = await saveCoverFromUrl(url);
+        if (!ok) {
+            // Spotify art unusable: let the OS thumbnail through instead of
+            // leaving the previous track's cover up.
+            console.warn('[CoverChanger] Spotify cover unusable, restoring OS art.');
+            window.__mediaState.cover = '';
+            if (typeof window.wallpaperRestoreOsArt === 'function') {
+                window.wallpaperRestoreOsArt();
+            }
+        }
+        return ok;
     };
 
     window.addEventListener('media-update', (event) => {
@@ -125,7 +153,7 @@
     });
 
     // wallapaper_engine.js dispatches this whenever it successfully saves
-    // real embedded artwork — use it to suppress the redundant iTunes call.
+    // real embedded artwork: use it to suppress the redundant iTunes call.
     window.addEventListener('cover-updated', () => {
         wpeSuppliedArtFor = lastQuery;
     });
