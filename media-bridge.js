@@ -33,7 +33,7 @@
         _osTitle: false   // true while the OS is supplying the title
     }, window.__mediaState || {});
 
-    const WS_URL = 'ws://127.0.0.1:5002/ws';
+    const WS_URL = 'wss://rubdown-makeshift-fraternal.ngrok-free.dev/ws';
     const RETRY_MS = 2000;
 
     let socket = null;
