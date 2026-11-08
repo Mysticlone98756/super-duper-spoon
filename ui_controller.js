@@ -1,5 +1,11 @@
 // ui_controller.js – cover, title, artist, controls + animated (motion) covers
 //
+// TITLE
+//  * The title sits on one line at full size. If it is wider than its box it
+//    scrolls like Spotify: pause, slide to the end, pause, slide back.
+//    Short titles stay centered and still. (See .track-title.scrolling in
+//    style.css.)
+//
 // Animated-cover identity handling:
 //  * Every loop is stored together with the track/album the relay announced it
 //    for (videoMeta). On a song change it is kept only if it provably belongs
@@ -18,6 +24,16 @@
 
     const trackTitle = document.getElementById('track-title');
     const trackArtist = document.getElementById('track-artist');
+
+    // The text lives in its own span so the marquee can move it. Never set
+    // textContent on #track-title itself: that would delete this span.
+    let trackTitleText = document.getElementById('track-title-text');
+    if (!trackTitleText) {
+        trackTitleText = document.createElement('span');
+        trackTitleText.id = 'track-title-text';
+        trackTitle.textContent = '';
+        trackTitle.appendChild(trackTitleText);
+    }
 
     const playPauseBtn = document.getElementById('sfPlayFill');
     const seekBackBtn = document.getElementById('sfBackwardFill');
@@ -80,69 +96,42 @@
         loadAnimatedCover(url, meta);
     }
 
-    // ── DOM-based (exact) title width measurement ──
-    let _titleMeasureEl = null;
-    function getTitleMeasureEl(referenceEl) {
-        if (!_titleMeasureEl) {
-            _titleMeasureEl = document.createElement('span');
-            _titleMeasureEl.style.position = 'absolute';
-            _titleMeasureEl.style.visibility = 'hidden';
-            _titleMeasureEl.style.whiteSpace = 'nowrap';
-            _titleMeasureEl.style.left = '-9999px';
-            _titleMeasureEl.style.top = '-9999px';
-            document.body.appendChild(_titleMeasureEl);
-        }
-        const cs = getComputedStyle(referenceEl);
-        _titleMeasureEl.style.fontFamily = cs.fontFamily;
-        _titleMeasureEl.style.fontSize = cs.fontSize;
-        _titleMeasureEl.style.fontWeight = cs.fontWeight;
-        _titleMeasureEl.style.letterSpacing = cs.letterSpacing;
-        return _titleMeasureEl;
+    // ── Scrolling title (Spotify-style marquee) ──
+    const SCROLL_SPEED_PX_S = 45;    // marquee speed
+    const SCROLL_PAUSE_FRAC = 0.30;  // share of each pass spent paused (15% at each end)
+    const SCROLL_EDGE_PAD_PX = 24;   // extra distance so the last letters clear the edge fade
+    let lastRenderedTitle = null;
+
+    // Measures the title and turns the marquee on only if it doesn't fit.
+    function fitTitle() {
+        trackTitle.classList.remove('scrolling');
+        trackTitle.style.removeProperty('--scroll-dist');
+        trackTitle.style.removeProperty('--scroll-dur');
+
+        const overflow = trackTitleText.offsetWidth - trackTitle.clientWidth;
+        if (overflow <= 2) return; // fits: stays centered and still
+
+        const dist = overflow + SCROLL_EDGE_PAD_PX;
+        const moveSecs = dist / SCROLL_SPEED_PX_S;
+        const totalSecs = moveSecs / (1 - SCROLL_PAUSE_FRAC);
+
+        trackTitle.style.setProperty('--scroll-dist', '-' + dist + 'px');
+        trackTitle.style.setProperty('--scroll-dur', totalSecs.toFixed(2) + 's');
+        trackTitle.classList.add('scrolling');
     }
 
-    function getTextWidthDOM(text, referenceEl) {
-        const el = getTitleMeasureEl(referenceEl);
-        el.textContent = text;
-        return el.getBoundingClientRect().width;
+    function renderTitle(title) {
+        // updateUI runs several times a second; only touch the DOM when the
+        // text really changed, otherwise the marquee would restart each time.
+        if (title === lastRenderedTitle) return;
+        lastRenderedTitle = title;
+        trackTitleText.textContent = title;
+        fitTitle();
     }
 
-    // Longest prefix of `text` that fits within maxWidthPx (mid-word break).
-    function hardBreakToFit(text, maxWidthPx, referenceEl) {
-        let lo = 1, hi = text.length, best = 1;
-        while (lo <= hi) {
-            const mid = (lo + hi) >> 1;
-            if (getTextWidthDOM(text.slice(0, mid), referenceEl) <= maxWidthPx) {
-                best = mid;
-                lo = mid + 1;
-            } else {
-                hi = mid - 1;
-            }
-        }
-        return best;
-    }
-
-    function wrapTitleByWidth(text, maxWidthPx, referenceEl) {
-        if (!text) return text;
-        if (!maxWidthPx || maxWidthPx <= 0) return text;
-        if (getTextWidthDOM(text, referenceEl) <= maxWidthPx) return text;
-
-        const words = text.split(' ');
-        let line1 = '';
-        let i = 0;
-        for (; i < words.length; i++) {
-            const candidate = line1 ? line1 + ' ' + words[i] : words[i];
-            if (getTextWidthDOM(candidate, referenceEl) > maxWidthPx) {
-                if (line1) break;
-                const cut = hardBreakToFit(words[i], maxWidthPx, referenceEl);
-                line1 = words[i].slice(0, cut);
-                const rest = words[i].slice(cut);
-                const remainder = [rest, ...words.slice(i + 1)].join(' ').trim();
-                return remainder ? line1 + '\n' + remainder : line1;
-            }
-            line1 = candidate;
-        }
-        const line2 = words.slice(i).join(' ');
-        return line2 ? line1 + '\n' + line2 : line1;
+    window.addEventListener('resize', fitTitle);
+    if (document.fonts && document.fonts.ready) {
+        document.fonts.ready.then(fitTitle);
     }
 
     // Keeps the animated cover in step with the play/pause state.
@@ -158,10 +147,7 @@
 
     function updateUI(state) {
         if (!state) return;
-        const maxWidthPx = trackTitle.clientWidth
-            || (trackTitle.parentElement && trackTitle.parentElement.clientWidth)
-            || 500;
-        trackTitle.textContent = wrapTitleByWidth(state.title || 'No track playing', maxWidthPx, trackTitle);
+        renderTitle(state.title || 'No track playing');
         trackArtist.textContent = state.artist || 'Unknown Artist';
         isPaused = state.is_playing === false;
         updatePlayPauseButton(isPaused);
@@ -471,5 +457,5 @@
 
     connectBridgeWebSocket();
 
-    console.log('[UI] Controller initialized (animated covers: identity-checked).');
+    console.log('[UI] Controller initialized (scrolling title, identity-checked animated covers).');
 })();
