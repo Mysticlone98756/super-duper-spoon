@@ -97,8 +97,8 @@
     }
 
     // ── Scrolling title (Spotify-style marquee) ──
-    const SCROLL_SPEED_PX_S = 45;    // marquee speed
-    const SCROLL_PAUSE_FRAC = 0.30;  // share of each pass spent paused (15% at each end)
+    const SCROLL_SPEED_PX_S = 65;    // marquee speed
+    const SCROLL_PAUSE_FRAC = 0.1;  // share of each pass spent paused (15% at each end)
     const SCROLL_EDGE_PAD_PX = 24;   // extra distance so the last letters clear the edge fade
     let lastRenderedTitle = null;
 
